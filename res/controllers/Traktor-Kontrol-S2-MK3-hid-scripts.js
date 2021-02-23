@@ -118,7 +118,7 @@ TraktorS2MK3.registerInputPackets = function () {
     this.registerInputButton(messageShort, "[Channel2]", "!LoadSelectedTrack", 0x07, 0x08, this.loadTrackHandler);
 
     this.registerInputButton(messageShort, "[Channel1]", "!MaximizeLibrary", 0x01, 0x08, this.maximizeLibraryHandler);
-    this.registerInputButton(messageShort, "[Channel2]", "!MaximizeLibrary", 0x04, 0x20, this.maximizeLibraryHandler);
+    this.registerInputButton(messageShort, "[Channel2]", "!MaximizeLibrary", 0x04, 0x20, this.MoveFocusForwardHandler);
     this.registerInputButton(messageShort, "[Channel1]", "!AddTrack", 0x01, 0x04, this.addTrackHandler);
     this.registerInputButton(messageShort, "[Channel2]", "!AddTrack", 0x04, 0x10, this.addTrackHandler);
 
@@ -417,6 +417,14 @@ TraktorS2MK3.addTrackHandler = function (field) {
     } else {
         engine.setValue("[Library]", "AutoDjAddBottom", field.value);
     }
+};
+
+TraktorS2MK3.MoveFocusForwardHandler = function (field) {
+    if (field.value === 0) {
+        return;
+    }
+
+    script.triggerControl("[Library]", "MoveFocusForward");
 };
 
 TraktorS2MK3.maximizeLibraryHandler = function (field) {
