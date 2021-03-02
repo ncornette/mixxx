@@ -277,12 +277,16 @@ TraktorS2MK3.keylockHandler = function (field) {
         return;
     }
 
-    script.toggleControl(field.group, "keylock");
+    if (TraktorS2MK3.shiftPressed[field.group]) {
+        engine.setValue(field.group, "reset_key", field.value);
+    } else {
+        script.toggleControl(field.group, "keylock");
+    }
 };
 
 TraktorS2MK3.syncHandler = function (field) {
     if (TraktorS2MK3.shiftPressed[field.group]) {
-        engine.setValue(field.group, "beatsync_phase", field.value);
+        engine.setValue(field.group, "sync_key", field.value);
         // Light LED while pressed
         TraktorS2MK3.outputHandler(field.value, field.group, "sync_enabled");
     } else {
