@@ -413,9 +413,9 @@ TraktorS2MK3.addTrackHandler = function (field) {
     TraktorS2MK3.outputHandler(field.value, field.group, "addTrack");
 
     if (TraktorS2MK3.shiftPressed[field.group]) {
-        engine.setValue("[Library]", "AutoDjAddTop", field.value);
+        engine.setValue(field.group, "stars_down", field.value);
     } else {
-        engine.setValue("[Library]", "AutoDjAddBottom", field.value);
+        engine.setValue(field.group, "stars_up", field.value);
     }
 };
 
