@@ -35,9 +35,15 @@ var TraktorS2MK3 = new function () {
     this.syncPressedTimer = { "[Channel1]": 0, "[Channel2]": 0 }; // Timer to distinguish between short and long press
 
     // Jog wheels
-    this.pitchBendMultiplier = 1.1;
-    this.lastTickVal = [0, 0];
-    this.lastTickTime = [0.0, 0.0];
+    this.controller.wheelTouchInertiaTimer = {
+        "[Channel1]": 0,
+        "[Channel2]": 0,
+    };
+
+    // TODO: convert to Object()s for easier logic.
+    this.controller.last_tick_val = [0, 0];
+    this.controller.last_tick_time = [0.0, 0.0];
+    this.controller.sync_enabled_time = Object();
 
     // VuMeter
     this.vuLeftConnection = {};
@@ -540,64 +546,198 @@ TraktorS2MK3.samplerPregainHandler = function (field) {
     }
 };
 
-TraktorS2MK3.jogTouchHandler = function (field) {
-    var deckNumber = TraktorS2MK3.controller.resolveDeck(field.group);
-    if (field.value > 0) {
-        engine.scratchEnable(deckNumber, 1024, 33 + 1 / 3, 0.125, 0.125 / 8, true);
+//TraktorS2MK3.jogTouchHandler = function (field) {
+//    var deckNumber = TraktorS2MK3.controller.resolveDeck(field.group);
+//    if (field.value > 0) {
+//        engine.scratchEnable(deckNumber, 1024, 33 + 1 / 3, 0.125, 0.125 / 8, true);
+//    } else {
+//        engine.scratchDisable(deckNumber);
+//    }
+//};
+//
+
+// Jog wheel touch code taken from VCI400.  It should be moved into common-hid-packet-parser.js
+TraktorS2MK3.jogTouchHandler = function(field) {
+    if (TraktorS2MK3.controller.wheelTouchInertiaTimer[field.group] != 0) {
+        // The wheel was touched again, reset the timer.
+        engine.stopTimer(TraktorS2MK3.controller.wheelTouchInertiaTimer[field.group]);
+        TraktorS2MK3.controller.wheelTouchInertiaTimer[field.group] = 0;
+    }
+    var play = engine.getValue(field.group, "play");
+
+    if (field.value !== 0) {
+        var deckNumber = TraktorS2MK3.controller.resolveDeck(field.group);
+        if (play != 0) {
+            //TraktorS2MK3.slipAutoHandler(field.group, 1);
+        }
+        engine.scratchEnable(deckNumber, 1024, 33.3333, 0.125, 0.125/8, true);
     } else {
-        engine.scratchDisable(deckNumber);
+        // The wheel touch sensor can be overly sensitive, so don't release scratch mode right away.
+        // Depending on how fast the platter was moving, lengthen the time we'll wait.
+        var scratchRate = Math.abs(engine.getValue(field.group, "scratch2"));
+        // Note: inertiaTime multiplier is controller-specific and should be factored out.
+        var inertiaTime = Math.pow(1.8, scratchRate) * 2;
+        if (inertiaTime < 100) {
+            // Just do it now.
+            TraktorS2MK3.finishJogTouch(field);
+        } else {
+            TraktorS2MK3.controller.wheelTouchInertiaTimer[field.group] = engine.beginTimer(
+                inertiaTime, "TraktorS2MK3.finishJogTouch(\"" + field.group + "\")", true);
+        }
     }
 };
 
-TraktorS2MK3.jogHandler = function (field) {
+TraktorS2MK3.finishJogTouch = function(field) {
+    TraktorS2MK3.controller.wheelTouchInertiaTimer[field.group] = 0;
     var deckNumber = TraktorS2MK3.controller.resolveDeck(field.group);
-    var deltas = TraktorS2MK3.wheelDeltas(deckNumber, field.value);
-    var tickDelta = deltas[0];
-    var timeDelta = deltas[1];
+    // No vinyl button (yet)
+    /*if (this.vinylActive) {
+    // Vinyl button still being pressed, don't disable scratch mode yet.
+    this.wheelTouchInertiaTimer[field.group] = engine.beginTimer(
+    100, "VestaxVCI400.Decks." + this.deckIdentifier + ".finishJogTouch()", true);
+    return;
+    }*/
+    var play = engine.getValue(field.group, "play");
+    if (play != 0) {
+        // If we are playing, just hand off to the engine.
+        engine.scratchDisable(deckNumber, true);
+        //TraktorS2MK3.slipAutoHandler(field.group, 0);
 
-    if (engine.isScratching(deckNumber)) {
-        engine.scratchTick(deckNumber, tickDelta);
     } else {
-        var velocity = (tickDelta / timeDelta) * TraktorS2MK3.pitchBendMultiplier;
-        engine.setValue(field.group, "jog", velocity);
+        // If things are paused, there will be a non-smooth handoff between scratching and jogging.
+        // Instead, keep scratch on until the platter is not moving.
+        var scratchRate = Math.abs(engine.getValue(field.group, "scratch2"));
+        if (scratchRate < 0.01) {
+            // The platter is basically stopped, now we can disable scratch and hand off to jogging.
+            engine.scratchDisable(deckNumber, false);
+            // Handle auto slip mode
+        } else {
+            // Check again soon.
+            TraktorS2MK3.controller.wheelTouchInertiaTimer[field.group] = engine.beginTimer(
+                100, "TraktorS2MK3.finishJogTouch(\"" + field.group + "\")", true);
+        }
     }
 };
 
-TraktorS2MK3.wheelDeltas = function (deckNumber, value) {
+TraktorS2MK3.jogHandler = function(field) {
+    var deltas = TraktorS2MK3.wheelDeltas(field.group, field.value);
+    var tick_delta = deltas[0];
+    var time_delta = deltas[1];
+
+    var velocity = TraktorS2MK3.scalerJog(field, tick_delta, time_delta);
+    engine.setValue(field.group, "jog", velocity);
+    if (engine.getValue(field.group, "scratch2_enable")) {
+        var deckNumber = TraktorS2MK3.controller.resolveDeck(field.group);
+        engine.scratchTick(deckNumber, tick_delta);
+    }
+};
+
+TraktorS2MK3.wheelDeltas = function(group, value) {
     // When the wheel is touched, four bytes change, but only the first behaves predictably.
     // It looks like the wheel is 1024 ticks per revolution.
     var tickval = value & 0xFF;
     var timeval = value >>> 16;
-    var prevTick = 0;
-    var prevTime = 0;
+    var prev_tick = 0;
+    var prev_time = 0;
 
-    // Group 1 and 2 -> Array index 0 and 1
-    prevTick = this.lastTickVal[deckNumber - 1];
-    prevTime = this.lastTickTime[deckNumber - 1];
-    this.lastTickVal[deckNumber - 1] = tickval;
-    this.lastTickTime[deckNumber - 1] = timeval;
+    if (group[8] === "1" || group[8] === "3") {
+        prev_tick = TraktorS2MK3.controller.last_tick_val[0];
+        prev_time = TraktorS2MK3.controller.last_tick_time[0];
+        TraktorS2MK3.controller.last_tick_val[0] = tickval;
+        TraktorS2MK3.controller.last_tick_time[0] = timeval;
+    } else {
+        prev_tick = TraktorS2MK3.controller.last_tick_val[1];
+        prev_time = TraktorS2MK3.controller.last_tick_time[1];
+        TraktorS2MK3.controller.last_tick_val[1] = tickval;
+        TraktorS2MK3.controller.last_tick_time[1] = timeval;
+    }
 
-    if (prevTime > timeval) {
+    if (prev_time > timeval) {
         // We looped around.  Adjust current time so that subtraction works.
         timeval += 0x10000;
     }
-    var timeDelta = timeval - prevTime;
-    if (timeDelta === 0) {
+    var time_delta = timeval - prev_time;
+    if (time_delta === 0) {
         // Spinning too fast to detect speed!  By not dividing we are guessing it took 1ms.
-        timeDelta = 1;
+        time_delta = 1;
     }
 
-    var tickDelta = 0;
-    if (prevTick >= 200 && tickval <= 100) {
-        tickDelta = tickval + 256 - prevTick;
-    } else if (prevTick <= 100 && tickval >= 200) {
-        tickDelta = tickval - prevTick - 256;
+    var tick_delta = 0;
+    if (prev_tick >= 200 && tickval <= 100) {
+        tick_delta = tickval + 256 - prev_tick;
+    } else if (prev_tick <= 100 && tickval >= 200) {
+        tick_delta = tickval - prev_tick - 256;
     } else {
-        tickDelta = tickval - prevTick;
+        tick_delta = tickval - prev_tick;
     }
-
-    return [tickDelta, timeDelta];
+    //HIDDebug(group + " " + tickval + " " + prev_tick + " " + tick_delta);
+    return [tick_delta, time_delta];
 };
+
+TraktorS2MK3.scalerJog = function(field, tick_delta, time_delta) {
+    // If it's playing nudge
+    if (engine.getValue(field.group, "play")) {
+        return (tick_delta / time_delta) / 3;
+    } else {
+        //If shift pressed, fast search through tracks
+        // otherwise search normal speed
+        if (TraktorS2MK3.shiftPressed[field.group]) {
+            return (tick_delta / time_delta) * 20.0;
+        } else {
+            return (tick_delta / time_delta) * 2.0;
+        }
+    }
+};
+
+//TraktorS2MK3.jogHandler = function (field) {
+//    var deckNumber = TraktorS2MK3.controller.resolveDeck(field.group);
+//    var deltas = TraktorS2MK3.wheelDeltas(deckNumber, field.value);
+//    var tickDelta = deltas[0];
+//    var timeDelta = deltas[1];
+//
+//    if (engine.isScratching(deckNumber)) {
+//        engine.scratchTick(deckNumber, tickDelta);
+//    } else {
+//        var velocity = (tickDelta / timeDelta) * TraktorS2MK3.pitchBendMultiplier;
+//        engine.setValue(field.group, "jog", velocity);
+//    }
+//};
+//
+//TraktorS2MK3.wheelDeltas = function (deckNumber, value) {
+//    // When the wheel is touched, four bytes change, but only the first behaves predictably.
+//    // It looks like the wheel is 1024 ticks per revolution.
+//    var tickval = value & 0xFF;
+//    var timeval = value >>> 16;
+//    var prevTick = 0;
+//    var prevTime = 0;
+//
+//    // Group 1 and 2 -> Array index 0 and 1
+//    prevTick = this.lastTickVal[deckNumber - 1];
+//    prevTime = this.lastTickTime[deckNumber - 1];
+//    this.lastTickVal[deckNumber - 1] = tickval;
+//    this.lastTickTime[deckNumber - 1] = timeval;
+//
+//    if (prevTime > timeval) {
+//        // We looped around.  Adjust current time so that subtraction works.
+//        timeval += 0x10000;
+//    }
+//    var timeDelta = timeval - prevTime;
+//    if (timeDelta === 0) {
+//        // Spinning too fast to detect speed!  By not dividing we are guessing it took 1ms.
+//        timeDelta = 1;
+//    }
+//
+//    var tickDelta = 0;
+//    if (prevTick >= 200 && tickval <= 100) {
+//        tickDelta = tickval + 256 - prevTick;
+//    } else if (prevTick <= 100 && tickval >= 200) {
+//        tickDelta = tickval - prevTick - 256;
+//    } else {
+//        tickDelta = tickval - prevTick;
+//    }
+//
+//    return [tickDelta, timeDelta];
+//};
 
 TraktorS2MK3.fxHandler = function (field) {
     if (field.value === 0) {
@@ -958,6 +1098,41 @@ TraktorS2MK3.shutdown = function () {
     HIDDebug("TraktorS2MK3: Shutdown done!");
 };
 
-TraktorS2MK3.incomingData = function (data, length) {
-    TraktorS2MK3.controller.parsePacket(data, length);
+// Called by Mixxx -- mandatory function to receive anything from HID
+TraktorS2MK3.incomingData = function(data, length) {
+    // Packets of 21 bytes are message 0x01 and can be handed off right away
+    if (length === 20 || length === 21 || length === 79) {
+        TraktorS2MK3.controller.parsePacket(data, length);
+        return;
+    }
+
+    // Packets of 64 bytes and 15 bytes are partials.  We have to save the 64 byte portion and then
+    // append the 15 bytes when we get it.
+    if (length === 64) {
+        this.partial_packet = data;
+        return;
+    }
+
+    if (length === 15) {
+        if (this.partial_packet.length !== 64) {
+            HIDDebug("Traktor S4MK2: Received second half of message but don't have first half, ignoring");
+            return;
+        }
+        // packet data is a javascript Object with properties that are integers (!).  So it's actually
+        // unordered data (!!).  So "appending" is just setting more properties.
+        partial_length = this.partial_packet.length;
+        for (var i = 0; i < length; i++) {
+            this.partial_packet[partial_length + i] = data[i];
+        }
+        TraktorS2MK3.controller.parsePacket(this.partial_packet, partial_length + length);
+        // Clear out the partial packet
+        this.partial_packet = Object();
+        return;
+    }
+    if (length === 79) {
+        // Windows seems to get the packet of length 79, so parse as one:
+        TraktorS2MK3.controller.parsePacket(data, data.length);
+        return;
+    }
+    HIDDebug("Traktor S4MK2: Unhandled packet size: " + length);
 };
